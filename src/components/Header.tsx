@@ -1,6 +1,7 @@
 import React from 'react';
-import { Printer, Globe, Shield, Clock, UploadCloud } from 'lucide-react';
+import { Printer, Globe, Shield, Clock, UploadCloud, Sun, Moon } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { useTheme } from '../context/ThemeContext';
 
 interface HeaderProps {
   currentView: 'quick-upload' | 'remote-upload' | 'status' | 'admin';
@@ -16,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   onAdminLogout,
 }) => {
   const { lang, toggleLanguage, t } = useI18n();
+  const { theme, toggleTheme } = useTheme();
 
   return (
     <header className="sticky top-0 z-30 bg-slate-900 text-white shadow-md border-b border-slate-800">
@@ -76,12 +78,26 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="hidden sm:inline">{t.trackStatus}</span>
           </button>
 
+          {/* Theme Toggle Button */}
+          <button
+            onClick={toggleTheme}
+            id="btn-theme-toggle"
+            title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            className="p-2 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg border border-slate-700/80 transition-colors flex items-center justify-center cursor-pointer"
+          >
+            {theme === 'dark' ? (
+              <Sun className="w-4 h-4 text-amber-400" />
+            ) : (
+              <Moon className="w-4 h-4 text-sky-400" />
+            )}
+          </button>
+
           {/* Language Switcher */}
           <button
             onClick={toggleLanguage}
             id="btn-lang-toggle"
             title="Switch Language (English / Tagalog)"
-            className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center gap-1.5 transition-colors"
+            className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <Globe className="w-3.5 h-3.5 text-sky-400" />
             <span>{lang === 'en' ? 'EN' : 'FIL'}</span>
@@ -107,7 +123,7 @@ export const Header: React.FC<HeaderProps> = ({
                   onClick={onAdminLogout}
                   id="btn-admin-logout"
                   title="Log out from admin"
-                  className="px-2 py-1.5 text-xs text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors"
+                  className="px-2 py-1.5 text-xs text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
                 >
                   Logout
                 </button>
@@ -118,7 +134,7 @@ export const Header: React.FC<HeaderProps> = ({
               onClick={() => onNavigate('admin')}
               id="btn-admin-login-nav"
               title="Admin Portal"
-              className="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition-colors"
+              className="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
             >
               <Shield className="w-4 h-4" />
             </button>

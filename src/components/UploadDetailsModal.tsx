@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Copy,
@@ -21,8 +21,15 @@ import {
   AlertCircle,
   ExternalLink,
 } from 'lucide-react';
-import { PrintRequest, UploadedFileInfo, RequestStatus } from '../types';
+import { PrintRequest, UploadedFileInfo, RequestStatus, StaffNote } from '../types';
 import { formatFileSize, getFileIcon } from './FileDropzone';
+import { downloadAuthenticatedFile, printJobTicket } from '../utils/download';
+import {
+  formatStaffNoteDate,
+  formatSafeDateTime,
+  formatSafeTime,
+  sortStaffNotesNewestFirst,
+} from '../utils/date';
 
 interface UploadDetailsModalProps {
   request: PrintRequest | null;
@@ -47,7 +54,15 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [newNoteText, setNewNoteText] = useState('');
   const [isAddingNote, setIsAddingNote] = useState(false);
-  const [notesList, setNotesList] = useState(request?.internalNotes || []);
+  const [notesList, setNotesList] = useState<StaffNote[]>(() =>
+    sortStaffNotesNewestFirst(request?.internalNotes || [])
+  );
+
+  useEffect(() => {
+    if (request?.internalNotes) {
+      setNotesList(sortStaffNotesNewestFirst(request.internalNotes));
+    }
+  }, [request?.internalNotes]);
 
   if (!request) return null;
 
@@ -58,25 +73,23 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
   };
 
   const handleDownloadZip = () => {
-    window.open(
-      `/api/admin/requests/${request.id}/download-zip?token=${encodeURIComponent(token)}`,
-      '_blank'
+    downloadAuthenticatedFile(
+      `/api/admin/requests/${request.id}/download-zip`,
+      token,
+      `Oyangoren_Print_Request_${request.referenceCode}.zip`
     );
   };
 
-  const handleDownloadSingle = (fileId: string) => {
-    window.open(
-      `/api/admin/files/${fileId}/download?token=${encodeURIComponent(token)}`,
-      '_blank'
+  const handleDownloadSingle = (fileId: string, filename: string) => {
+    downloadAuthenticatedFile(
+      `/api/admin/files/${fileId}/download`,
+      token,
+      filename || 'downloaded-file'
     );
   };
 
   const handleOpenTicket = () => {
-    window.open(
-      `/api/admin/requests/${request.id}/ticket?token=${encodeURIComponent(token)}`,
-      '_blank',
-      'width=800,height=900,menubar=no,toolbar=no,location=no,status=no'
-    );
+    printJobTicket(request.id, token);
   };
 
   const handleAddStaffNote = async (e: React.FormEvent) => {
@@ -98,8 +111,9 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
       });
 
       if (res.ok) {
-        const note = await res.json();
-        setNotesList((prev) => [...prev, note]);
+        const data = await res.json();
+        const newNote: StaffNote = data.note || data;
+        setNotesList((prev) => sortStaffNotesNewestFirst([newNote, ...prev.filter((n) => n.id !== newNote.id)]));
         setNewNoteText('');
         if (onRefreshRequest) onRefreshRequest();
       }
@@ -128,10 +142,7 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
     }
   };
 
-  const formattedDate = new Date(request.createdAt).toLocaleString(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
+  const formattedDate = formatSafeDateTime(request.createdAt);
 
   const printOpts = request.printOptions;
   const fileConfigs = request.fileConfigs || [];
@@ -392,7 +403,7 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
                         )}
                         <button
                           type="button"
-                          onClick={() => handleDownloadSingle(file.id)}
+                          onClick={() => handleDownloadSingle(file.id, file.originalFilename)}
                           title="Download file"
                           className="px-2.5 py-1.5 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
                         >
@@ -412,38 +423,48 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
           </div>
 
           {/* Internal Staff Notes Section */}
-          <div className="space-y-3 pt-2 border-t border-slate-200">
+          <div className="space-y-3 pt-2 border-t border-slate-200 dark:border-slate-800">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-600">
-                <MessageSquare className="w-4 h-4 text-sky-600" />
+              <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                <MessageSquare className="w-4 h-4 text-sky-600 dark:text-sky-400" />
                 <span>Internal Staff Notes ({notesList.length})</span>
               </div>
-              <span className="text-[10px] text-slate-400">Not visible to customers</span>
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">Not visible to customers</span>
             </div>
 
             {/* Notes list */}
             <div className="space-y-2">
-              {notesList.map((note) => (
-                <div
-                  key={note.id}
-                  className="p-3 bg-slate-50 rounded-2xl border border-slate-200 flex items-start justify-between gap-2 text-xs"
-                >
-                  <div className="space-y-1">
-                    <p className="text-slate-800 font-medium">{note.text}</p>
-                    <span className="text-[10px] text-slate-400">
-                      {note.author} • {new Date(note.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteStaffNote(note.id)}
-                    className="text-slate-400 hover:text-rose-600 p-1 cursor-pointer"
-                    title="Delete note"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
+              {notesList.length > 0 ? (
+                notesList.map((note) => {
+                  const author = note.author && note.author.trim() ? note.author.trim() : 'Staff Operator';
+                  const dateStr = formatStaffNoteDate(note.createdAt, 'Just now');
+                  return (
+                    <div
+                      key={note.id}
+                      className="p-3 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700/80 flex items-start justify-between gap-2 text-xs transition-colors"
+                    >
+                      <div className="space-y-1">
+                        <p className="text-slate-800 dark:text-slate-100 font-medium whitespace-pre-wrap">{note.text}</p>
+                        <span className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium block">
+                          {author} • {dateStr}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteStaffNote(note.id)}
+                        className="text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 p-1 cursor-pointer transition-colors"
+                        title="Delete note"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="text-xs text-slate-400 dark:text-slate-500 italic py-1">
+                  No internal notes added yet.
+                </p>
+              )}
             </div>
 
             {/* Add note input */}
@@ -453,12 +474,12 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
                 value={newNoteText}
                 onChange={(e) => setNewNoteText(e.target.value)}
                 placeholder="Add internal operator note..."
-                className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="flex-1 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/90 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <button
                 type="submit"
                 disabled={isAddingNote || !newNoteText.trim()}
-                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold disabled:opacity-50 flex items-center gap-1 cursor-pointer"
+                className="px-4 py-2 rounded-xl bg-slate-900 dark:bg-sky-600 hover:bg-slate-800 dark:hover:bg-sky-500 text-white text-xs font-bold disabled:opacity-50 flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Send className="w-3.5 h-3.5" />
                 <span>Add</span>
@@ -468,17 +489,17 @@ export const UploadDetailsModal: React.FC<UploadDetailsModalProps> = ({
 
           {/* Activity Logs / History */}
           {request.activityLogs && request.activityLogs.length > 0 && (
-            <div className="space-y-2 pt-2 border-t border-slate-200">
-              <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-600">
-                <History className="w-4 h-4 text-slate-500" />
+            <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+              <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                <History className="w-4 h-4 text-slate-500 dark:text-slate-400" />
                 <span>Activity History</span>
               </div>
-              <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-slate-50/50 p-2 text-xs">
+              <div className="divide-y divide-slate-100 dark:divide-slate-800 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 p-2 text-xs">
                 {request.activityLogs.map((log) => (
                   <div key={log.id} className="py-1.5 px-2.5 flex items-center justify-between">
-                    <span className="text-slate-700">{log.action}</span>
-                    <span className="text-[10px] text-slate-400">
-                      {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    <span className="text-slate-700 dark:text-slate-300">{log.action}</span>
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500 font-medium">
+                      {formatSafeTime(log.timestamp)}
                     </span>
                   </div>
                 ))}

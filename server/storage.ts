@@ -212,6 +212,26 @@ export function streamFilePreview(file: FileRecord, res: Response): void {
   fileStream.pipe(res);
 }
 
+function createZipArchive(options: any = { zlib: { level: 6 } }) {
+  let mod: any = archiverModule;
+  if (mod.default) mod = mod.default;
+  if (typeof mod === 'function') return mod('zip', options);
+  if (typeof mod.create === 'function') return mod.create('zip', options);
+  if (mod.ZipArchive) return new mod.ZipArchive(options);
+  if (archiverModule && (archiverModule as any).ZipArchive) {
+    return new (archiverModule as any).ZipArchive(options);
+  }
+  throw new Error('Unable to initialize ZIP archive engine.');
+}
+
+function sanitizeZipEntryName(rawName: string): string {
+  if (!rawName) return 'unnamed-file';
+  let name = rawName.replace(/[\/\\]+/g, '_').replace(/\.\./g, '_');
+  name = name.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!name.trim()) name = 'file';
+  return name;
+}
+
 /**
  * Bundles all files belonging to a request into a ZIP and streams it
  */
@@ -219,83 +239,133 @@ export function streamRequestZip(
   reqRecord: RequestRecord & { files: FileRecord[] },
   res: Response
 ): void {
-  if (reqRecord.files.length === 0) {
-    res.status(400).json({ error: 'No files available in this request' });
-    return;
-  }
-
-  let zipName = `${reqRecord.referenceCode}_Files.zip`;
-  if (reqRecord.customerName && reqRecord.customerName.trim()) {
-    const cleanCustomer = reqRecord.customerName
-      .trim()
-      .replace(/\s+/g, '-')
-      .replace(/[^a-zA-Z0-9_-]/g, '');
-    if (cleanCustomer) {
-      zipName = `${reqRecord.referenceCode}_${cleanCustomer}.zip`;
+  try {
+    if (!reqRecord || !Array.isArray(reqRecord.files) || reqRecord.files.length === 0) {
+      res.status(400).json({
+        error: 'ZIP_GENERATION_FAILED',
+        message: 'No files available in this print request.',
+      });
+      return;
     }
-  }
 
-  res.setHeader('Content-Type', 'application/zip');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${zipName}"; filename*=UTF-8''${encodeURIComponent(zipName)}`
-  );
+    const fileCheckResults = reqRecord.files.map((file) => {
+      const safePath = path.join(UPLOADS_DIR, path.basename(file.storedFilename));
+      const exists = fs.existsSync(safePath);
+      return { file, safePath, exists };
+    });
 
-  const archive = archiver('zip', {
-    zlib: { level: 6 },
-  });
+    const availableFiles = fileCheckResults.filter((item) => item.exists);
 
-  archive.on('error', (err: unknown) => {
-    console.error('Archiver error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to generate ZIP archive' });
+    if (availableFiles.length === 0) {
+      res.status(404).json({
+        error: 'ZIP_GENERATION_FAILED',
+        message: 'None of the requested files could be found on the storage server.',
+      });
+      return;
     }
-  });
 
-  archive.pipe(res);
+    let zipName = `${reqRecord.referenceCode}_Files.zip`;
+    if (reqRecord.customerName && reqRecord.customerName.trim()) {
+      const cleanCustomer = reqRecord.customerName
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-zA-Z0-9_-]/g, '');
+      if (cleanCustomer) {
+        zipName = `${reqRecord.referenceCode}_${cleanCustomer}.zip`;
+      }
+    }
 
-  // Track filenames to avoid duplicates inside the ZIP
-  const usedNames = new Set<string>();
+    const cleanHeaderZipName = zipName.replace(/["\r\n\\]/g, '_');
 
-  for (const file of reqRecord.files) {
-    const safePath = path.join(UPLOADS_DIR, path.basename(file.storedFilename));
-    if (fs.existsSync(safePath)) {
-      let entryName = file.originalFilename;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${cleanHeaderZipName}"; filename*=UTF-8''${encodeURIComponent(zipName)}`
+    );
+
+    const archive = createZipArchive({ zlib: { level: 6 } });
+
+    archive.on('error', (err: unknown) => {
+      console.error('Archiver error streaming ZIP:', err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'ZIP_STREAM_ERROR',
+          message: 'An error occurred while generating the ZIP archive.',
+        });
+      } else {
+        res.end();
+      }
+    });
+
+    archive.pipe(res);
+
+    const usedNames = new Set<string>();
+
+    for (const item of availableFiles) {
+      const file = item.file;
+      const cleanName = sanitizeZipEntryName(file.originalFilename);
+      let entryName = cleanName;
       let counter = 1;
+
       while (usedNames.has(entryName)) {
-        const ext = path.extname(file.originalFilename);
-        const base = path.basename(file.originalFilename, ext);
+        const ext = path.extname(cleanName);
+        const base = path.basename(cleanName, ext);
         entryName = `${base} (${counter})${ext}`;
         counter++;
       }
+
       usedNames.add(entryName);
-      archive.file(safePath, { name: entryName });
+      archive.file(item.safePath, { name: entryName });
+    }
+
+    const missingFiles = fileCheckResults.filter((item) => !item.exists);
+
+    const summaryLines = [
+      `OYANGOREN PRINTING SERVICES – PRINT ORDER SUMMARY`,
+      `================================================`,
+      `Reference Code: ${reqRecord.referenceCode}`,
+      `Order Date: ${new Date(reqRecord.createdAt).toLocaleString()}`,
+      `Customer: ${reqRecord.customerName || 'Walk-in Customer'}`,
+      `Order Type: ${reqRecord.type === 'quick' ? 'Walk-in Quick Upload' : 'Remote Upload Link'}`,
+      `Status: ${reqRecord.status.toUpperCase()}`,
+      ``,
+      `PRINTING INSTRUCTIONS:`,
+      reqRecord.instructions || '(No special instructions provided)',
+      ``,
+      `INCLUDED FILES (${availableFiles.length}):`,
+      ...availableFiles.map(
+        (item, i) => `${i + 1}. ${item.file.originalFilename} (${(item.file.fileSize / 1024).toFixed(1)} KB)`
+      ),
+    ];
+
+    if (missingFiles.length > 0) {
+      summaryLines.push(
+        ``,
+        `WARNING - UNRESOLVED/MISSING FILES (${missingFiles.length}):`,
+        ...missingFiles.map((item, i) => `${i + 1}. ${item.file.originalFilename} (File not found on server storage)`)
+      );
+    }
+
+    summaryLines.push(
+      ``,
+      `================================================`,
+      `Oyangoren Printing Services`
+    );
+
+    archive.append(summaryLines.join('\n'), {
+      name: `PRINT_INSTRUCTIONS_${reqRecord.referenceCode}.txt`,
+    });
+
+    archive.finalize();
+  } catch (err: any) {
+    console.error('Exception in streamRequestZip:', err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'ZIP_GENERATION_FAILED',
+        message: err?.message || 'Failed to initialize ZIP archive stream.',
+      });
     }
   }
-
-  // Include a summary text file inside the ZIP
-  const summaryText = [
-    `OYANGOREN PRINTING SERVICES – PRINT ORDER SUMMARY`,
-    `================================================`,
-    `Reference Code: ${reqRecord.referenceCode}`,
-    `Order Date: ${new Date(reqRecord.createdAt).toLocaleString()}`,
-    `Customer: ${reqRecord.customerName || 'Walk-in Customer'}`,
-    `Order Type: ${reqRecord.type === 'quick' ? 'Walk-in Quick Upload' : 'Remote Upload Link'}`,
-    `Status: ${reqRecord.status.toUpperCase()}`,
-    ``,
-    `PRINTING INSTRUCTIONS:`,
-    reqRecord.instructions || '(No special instructions provided)',
-    ``,
-    `FILES LIST:`,
-    ...reqRecord.files.map((f, i) => `${i + 1}. ${f.originalFilename} (${(f.fileSize / 1024).toFixed(1)} KB)`),
-    ``,
-    `================================================`,
-    `Oyangoren Printing Services`,
-  ].join('\n');
-
-  archive.append(summaryText, { name: `PRINT_INSTRUCTIONS_${reqRecord.referenceCode}.txt` });
-
-  archive.finalize();
 }
 
 /**

@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+@layer base {
+  body {
+    @apply bg-slate-100 text-slate-800 dark:bg-[#070B14] dark:text-[#F8FAFC] transition-colors duration-200;
+  }
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -19,6 +25,30 @@
   body {
     background: white !important;
     color: black !important;
+  }
+  body * {
+    visibility: hidden;
+  }
+  #printable-counter-sign,
+  #printable-counter-sign * {
+    visibility: visible;
+  }
+  #printable-counter-sign {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 210mm;
+    height: 297mm;
+    margin: 0;
+    padding: 15mm;
+    box-sizing: border-box;
+    border: none !important;
+    box-shadow: none !important;
+    background: white !important;
+  }
+  @page {
+    size: A4 portrait;
+    margin: 0;
   }
 }
 

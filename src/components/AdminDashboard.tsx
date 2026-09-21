@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import QRCode from 'qrcode';
+import { normalizeDate, formatSafeDateTime, formatSafeDate, formatSafeTime } from '../utils/date';
 import {
   Inbox,
   Link as LinkIcon,
@@ -43,6 +45,7 @@ import {
   RequestStatus,
 } from '../types';
 import { formatFileSize, getFileIcon } from './FileDropzone';
+import { downloadAuthenticatedFile } from '../utils/download';
 import { QRCodeModal } from './QRCodeModal';
 import { PrintSignModal } from './PrintSignModal';
 import { FilePreviewModal } from './FilePreviewModal';
@@ -401,18 +404,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   // Download ZIP
-  const handleDownloadZip = (requestId: string) => {
-    window.open(
-      `/api/admin/requests/${requestId}/download-zip?token=${encodeURIComponent(token)}`,
-      '_blank'
+  const handleDownloadZip = (requestId: string, referenceCode?: string) => {
+    downloadAuthenticatedFile(
+      `/api/admin/requests/${requestId}/download-zip`,
+      token,
+      `Oyangoren_Print_Request_${referenceCode || requestId}.zip`
     );
   };
 
   // Download Individual File
-  const handleDownloadFile = (fileId: string) => {
-    window.open(
-      `/api/admin/files/${fileId}/download?token=${encodeURIComponent(token)}`,
-      '_blank'
+  const handleDownloadFile = (fileId: string, filename?: string) => {
+    downloadAuthenticatedFile(
+      `/api/admin/files/${fileId}/download`,
+      token,
+      filename || 'downloaded-file'
     );
   };
 
@@ -685,8 +690,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     // Sorting
     return list.sort((a, b) => {
+      const timeA = normalizeDate(a.createdAt)?.getTime() || 0;
+      const timeB = normalizeDate(b.createdAt)?.getTime() || 0;
       if (sortBy === 'oldest') {
-        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        return timeA - timeB;
       }
       if (sortBy === 'customer') {
         const nameA = a.customerName?.toLowerCase() || 'zz_walkin';
@@ -694,11 +701,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         return nameA.localeCompare(nameB);
       }
       // 'newest' default
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      return timeB - timeA;
     });
   }, [requests, statusFilter, typeFilter, searchQuery, sortBy]);
 
   const quickUploadUrl = `${window.location.origin}/upload`;
+  const [quickQrDataUrl, setQuickQrDataUrl] = useState('');
+
+  useEffect(() => {
+    if (quickUploadUrl) {
+      QRCode.toDataURL(quickUploadUrl, {
+        width: 1000,
+        margin: 3,
+        color: { dark: '#0f172a', light: '#ffffff' },
+      })
+        .then((data) => setQuickQrDataUrl(data))
+        .catch((err) => console.error('QR generation error:', err));
+    }
+  }, [quickUploadUrl]);
+
+  const handleDownloadQuickQr = () => {
+    if (!quickQrDataUrl) return;
+    const a = document.createElement('a');
+    a.href = quickQrDataUrl;
+    a.download = 'Oyangoren-Printing-Upload-QR.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
 
   return (
     <div className="w-full max-w-6xl mx-auto py-6 px-4 sm:px-6 space-y-6">
@@ -1136,11 +1166,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               {req.type === 'quick' ? 'Walk-in' : 'Remote Link'}
                             </span>
                             <span className="text-[11px] text-slate-400">
-                              {new Date(req.createdAt).toLocaleDateString()}{' '}
-                              {new Date(req.createdAt).toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })}
+                              {formatSafeDateTime(req.createdAt)}
                             </span>
                           </div>
 
@@ -1216,7 +1242,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         {/* Download All as ZIP */}
                         <button
                           type="button"
-                          onClick={() => handleDownloadZip(req.id)}
+                          onClick={() => handleDownloadZip(req.id, req.referenceCode)}
                           id={`btn-download-zip-${req.id}`}
                           title="Download all files as a ZIP"
                           className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
@@ -1316,7 +1342,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                                     <button
                                       type="button"
-                                      onClick={() => handleDownloadFile(file.id)}
+                                      onClick={() => handleDownloadFile(file.id, file.originalFilename)}
                                       id={`btn-download-file-${file.id}`}
                                       title="Download this file"
                                       className="px-2.5 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
@@ -1611,45 +1637,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               Walk-in Counter QR
             </span>
             <h2 className="text-2xl font-black text-slate-900 tracking-tight">
-              Scan to Send Files - Oyangoren Printing Services
+              Scan to Send Files – Oyangoren Printing Services
             </h2>
             <p className="text-xs sm:text-sm text-slate-500 max-w-md mx-auto">
-              Place this QR code on the printing shop counter or front desk. Customers can scan to immediately upload their printable files without logging in.
+              Scan using your phone camera to upload your files. Place this QR code on the printing shop counter or front desk.
             </p>
           </div>
 
-          <div className="p-6 bg-slate-50 rounded-2xl border border-slate-200 inline-block">
-            <img
-              src={`/api/qr?url=${encodeURIComponent(quickUploadUrl)}`}
-              alt="Permanent Quick Upload QR"
-              className="w-64 h-64 mx-auto rounded-xl shadow-md bg-white p-2 border border-slate-200"
-              id="img-permanent-qr"
-            />
+          <div className="p-6 bg-slate-50 rounded-3xl border border-slate-200 inline-block shadow-inner">
+            {quickQrDataUrl ? (
+              <img
+                src={quickQrDataUrl}
+                alt="Permanent Quick Upload QR"
+                className="w-64 h-64 sm:w-72 sm:h-72 mx-auto rounded-2xl shadow-md bg-white p-3 border border-slate-200"
+                id="img-permanent-qr"
+              />
+            ) : (
+              <div className="w-64 h-64 mx-auto rounded-2xl bg-slate-200 animate-pulse" />
+            )}
             <p className="text-xs font-mono font-bold text-slate-700 mt-3">
               {quickUploadUrl}
             </p>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
             <button
               type="button"
-              onClick={() => setIsPrintSignOpen(true)}
-              id="btn-print-shop-sign-tab"
-              className="w-full sm:w-auto px-6 py-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm shadow-md transition-colors flex items-center justify-center gap-2 cursor-pointer"
+              onClick={() => window.open(quickUploadUrl, '_blank')}
+              id="btn-open-upload-page"
+              className="px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs sm:text-sm transition-colors flex items-center gap-1.5 cursor-pointer"
             >
-              <Printer className="w-4 h-4" />
-              <span>Print Shop Counter Sign</span>
+              <ExternalLink className="w-4 h-4 text-sky-600" />
+              <span>Open Upload Page</span>
             </button>
-
-            <a
-              href={`/api/qr?url=${encodeURIComponent(quickUploadUrl)}&format=png`}
-              download="Oyangoren_Quick_Upload_QR.png"
-              id="btn-download-permanent-png"
-              className="w-full sm:w-auto px-6 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <Download className="w-4 h-4" />
-              <span>Download QR (PNG)</span>
-            </a>
 
             <button
               type="button"
@@ -1658,9 +1678,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 alert('Quick Upload URL copied to clipboard!');
               }}
               id="btn-copy-quick-url"
-              className="w-full sm:w-auto px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-sm transition-colors cursor-pointer"
+              className="px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs sm:text-sm transition-colors flex items-center gap-1.5 cursor-pointer"
             >
-              Copy Link
+              <Copy className="w-4 h-4 text-sky-600" />
+              <span>Copy Upload Link</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDownloadQuickQr}
+              id="btn-download-permanent-png"
+              className="px-4 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs sm:text-sm transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm"
+            >
+              <Download className="w-4 h-4" />
+              <span>Download QR</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsPrintSignOpen(true)}
+              id="btn-print-shop-sign-tab"
+              className="px-5 py-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs sm:text-sm shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <Printer className="w-4 h-4" />
+              <span>Printable Counter Sign</span>
             </button>
           </div>
         </div>

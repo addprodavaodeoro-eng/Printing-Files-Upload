@@ -26,6 +26,9 @@ const app = express();
 // SSE connection pool for real-time admin notifications
 const adminSseClients = new Set<Response>();
 
+// Public SSE connection pool for real-time customer status tracking
+const publicStatusSseClients = new Map<string, Set<Response>>();
+
 export function broadcastAdminEvent(eventName: string, data: unknown): void {
   const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of adminSseClients) {
@@ -33,6 +36,54 @@ export function broadcastAdminEvent(eventName: string, data: unknown): void {
       client.write(payload);
     } catch {
       adminSseClients.delete(client);
+    }
+  }
+}
+
+function broadcastPublicStatusUpdate(referenceCode: string) {
+  if (!referenceCode) return;
+  const code = referenceCode.toUpperCase();
+  const clients = publicStatusSseClients.get(code);
+  if (!clients || clients.size === 0) return;
+
+  const request = db.getRequestByReference(code);
+  if (!request) return;
+
+  const info = STATUS_DESCRIPTIONS[request.status] || {
+    label: request.status.replace(/_/g, ' ').toUpperCase(),
+    description: 'Your order is in the system queue.',
+    step: 1,
+  };
+
+  const publicTimeline = (request.activityLogs || []).map((log) => ({
+    id: log.id,
+    action: log.action,
+    timestamp: log.timestamp,
+  }));
+
+  const payload = JSON.stringify({
+    referenceCode: request.referenceCode,
+    status: request.status,
+    statusLabel: info.label,
+    statusDescription: info.description,
+    statusStep: info.step,
+    type: request.type,
+    fileCount: request.fileCount,
+    createdAt: request.createdAt,
+    lastUpdated: request.activityLogs && request.activityLogs.length > 0
+      ? request.activityLogs[request.activityLogs.length - 1].timestamp
+      : request.createdAt,
+    quotationStatus: (request as any).quotationStatus || 'Not Required',
+    paymentStatus: (request as any).paymentStatus || 'Cash on Pickup',
+    timeline: publicTimeline,
+  });
+
+  const sseMessage = `event: status_update\ndata: ${payload}\n\n`;
+  for (const client of clients) {
+    try {
+      client.write(sseMessage);
+    } catch {
+      clients.delete(client);
     }
   }
 }
@@ -257,6 +308,10 @@ function handlePublicStatusLookup(req: Request, res: Response) {
     timestamp: log.timestamp,
   }));
 
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   res.json({
     referenceCode: request.referenceCode,
     status: request.status,
@@ -269,12 +324,43 @@ function handlePublicStatusLookup(req: Request, res: Response) {
     lastUpdated: request.activityLogs && request.activityLogs.length > 0
       ? request.activityLogs[request.activityLogs.length - 1].timestamp
       : request.createdAt,
+    quotationStatus: (request as any).quotationStatus || 'Not Required',
+    paymentStatus: (request as any).paymentStatus || 'Cash on Pickup',
     timeline: publicTimeline,
   });
 }
 
 app.get('/api/status/:refCode', handlePublicStatusLookup);
 app.get('/api/upload/status/:refCode', handlePublicStatusLookup);
+
+// Public SSE status stream
+app.get('/api/status/:refCode/stream', (req: Request, res: Response) => {
+  const refCode = req.params.refCode ? req.params.refCode.trim().toUpperCase() : '';
+  if (!refCode) {
+    res.status(400).json({ error: 'Invalid reference code' });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  if (!publicStatusSseClients.has(refCode)) {
+    publicStatusSseClients.set(refCode, new Set());
+  }
+  const clients = publicStatusSseClients.get(refCode)!;
+  clients.add(res);
+
+  res.write(`event: connected\ndata: ${JSON.stringify({ connected: true, referenceCode: refCode })}\n\n`);
+
+  req.on('close', () => {
+    clients.delete(res);
+    if (clients.size === 0) {
+      publicStatusSseClients.delete(refCode);
+    }
+  });
+});
 
 // Quick Upload (Walk-in Customers)
 app.post(
@@ -684,6 +770,13 @@ app.post('/api/admin/requests/bulk-status', requireAdmin, (req: Request, res: Re
 
   const updatedCount = db.bulkUpdateStatus(requestIds, status, actor || 'Staff');
 
+  for (const id of requestIds) {
+    const reqObj = db.getRequestById(id);
+    if (reqObj) {
+      broadcastPublicStatusUpdate(reqObj.referenceCode);
+    }
+  }
+
   broadcastAdminEvent('bulk_status_changed', {
     requestIds,
     status,
@@ -737,6 +830,10 @@ app.patch('/api/admin/requests/:id/status', requireAdmin, (req: Request, res: Re
   }
 
   const updatedReq = db.getRequestById(req.params.id);
+
+  if (updatedReq) {
+    broadcastPublicStatusUpdate(updatedReq.referenceCode);
+  }
 
   broadcastAdminEvent('status_changed', {
     id: req.params.id,
@@ -843,13 +940,20 @@ app.delete('/api/admin/requests/:id', requireAdmin, (req: Request, res: Response
 
 // Download all files in a request as a ZIP
 app.get('/api/admin/requests/:id/download-zip', requireAdmin, (req: Request, res: Response) => {
-  const request = db.getRequestById(req.params.id);
-  if (!request) {
-    res.status(404).json({ error: 'Request not found' });
-    return;
-  }
+  try {
+    const request = db.getRequestById(req.params.id);
+    if (!request) {
+      res.status(404).json({ error: 'Request not found' });
+      return;
+    }
 
-  streamRequestZip(request, res);
+    streamRequestZip(request, res);
+  } catch (err: any) {
+    console.error('Download ZIP route error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to stream ZIP archive: ' + (err?.message || 'Server error') });
+    }
+  }
 });
 
 // Download individual file

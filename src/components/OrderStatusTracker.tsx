@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { formatSafeDateTime, formatSafeTime } from '../utils/date';
 import {
   Search,
   CheckCircle2,
@@ -12,6 +13,8 @@ import {
   PackageCheck,
   Eye,
   History,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 
@@ -36,6 +39,8 @@ interface PublicOrderStatusData {
   fileCount: number;
   createdAt: string;
   lastUpdated: string;
+  quotationStatus?: string;
+  paymentStatus?: string;
   timeline?: PublicTimelineItem[];
 }
 
@@ -57,33 +62,90 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
   const [loading, setLoading] = useState(false);
   const [orderData, setOrderData] = useState<PublicOrderStatusData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'live' | 'polling' | 'offline'>('live');
+  const [notifySound, setNotifySound] = useState<boolean>(() => {
+    return localStorage.getItem('oyangoren_notify_sound') === 'true';
+  });
+  const [statusHighlight, setStatusHighlight] = useState(false);
 
-  const fetchStatus = async (codeToSearch: string) => {
+  const prevStatusRef = useRef<string | null>(null);
+
+  const playChime = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.2);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.45);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.45);
+    } catch {}
+  };
+
+  const handleStatusUpdate = (newData: PublicOrderStatusData) => {
+    if (prevStatusRef.current && prevStatusRef.current !== newData.status) {
+      setStatusHighlight(true);
+      setTimeout(() => setStatusHighlight(false), 2500);
+      if (notifySound) {
+        playChime();
+      }
+    }
+    prevStatusRef.current = newData.status;
+    setOrderData(newData);
+  };
+
+  const fetchStatus = async (codeToSearch: string, silent = false) => {
     const clean = codeToSearch.trim().toUpperCase();
     if (!clean) return;
 
-    setLoading(true);
-    setError(null);
+    if (!navigator.onLine) {
+      setConnectionStatus('offline');
+      if (!silent) setError('Device is offline — waiting for connection.');
+      return;
+    }
+
+    if (!silent) setLoading(true);
+    if (!silent) setError(null);
 
     try {
-      const res = await fetch(`/api/status/${encodeURIComponent(clean)}`);
+      const res = await fetch(`/api/status/${encodeURIComponent(clean)}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+      });
+
       if (!res.ok) {
         if (res.status === 404) {
-          setError('No print request found for this reference code. Please verify the code on your slip or screen.');
+          if (!silent) setError('No print request found for this reference code. Please verify the code.');
         } else {
-          setError('Unable to fetch status right now. Please try again.');
+          if (!silent) setError('Unable to fetch status right now. Please try again.');
         }
-        setOrderData(null);
-        setLoading(false);
+        if (!silent) setOrderData(null);
+        if (!silent) setLoading(false);
         return;
       }
 
       const data: PublicOrderStatusData = await res.json();
-      setOrderData(data);
-      setLoading(false);
+      handleStatusUpdate(data);
+      if (!silent) setLoading(false);
+      setConnectionStatus('live');
     } catch {
-      setError('Connection interrupted. Please check network and try again.');
-      setLoading(false);
+      if (!navigator.onLine) {
+        setConnectionStatus('offline');
+      } else {
+        setConnectionStatus('polling');
+      }
+      if (!silent) setError('Connection interrupted. Retrying in background...');
+      if (!silent) setLoading(false);
     }
   };
 
@@ -93,27 +155,121 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
     }
   }, [initialCode]);
 
-  // Auto-refresh order status every 10 seconds if active
+  // Online / Offline listeners
   useEffect(() => {
-    if (!orderData?.referenceCode || orderData.status === 'completed' || orderData.status === 'cancelled') {
+    const handleOnline = () => {
+      if (orderData?.referenceCode) {
+        fetchStatus(orderData.referenceCode, true);
+      }
+    };
+    const handleOffline = () => {
+      setConnectionStatus('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [orderData?.referenceCode]);
+
+  // Page visibility listener
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden && orderData?.referenceCode) {
+        fetchStatus(orderData.referenceCode, true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [orderData?.referenceCode]);
+
+  // Real-time SSE + 5-second polling fallback
+  useEffect(() => {
+    const code = orderData?.referenceCode;
+    const currentStatus = orderData?.status;
+    const isTerminal = currentStatus === 'completed' || currentStatus === 'cancelled';
+
+    if (!code || isTerminal) {
       return;
     }
 
-    const interval = setInterval(() => {
-      fetch(`/api/status/${encodeURIComponent(orderData.referenceCode)}`)
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data) setOrderData(data);
-        })
-        .catch(() => {});
-    }, 10000);
+    let eventSource: EventSource | null = null;
+    let pollInterval: any = null;
 
-    return () => clearInterval(interval);
+    const connectSse = () => {
+      if (!navigator.onLine) {
+        setConnectionStatus('offline');
+        return;
+      }
+
+      try {
+        eventSource = new EventSource(`/api/status/${encodeURIComponent(code)}/stream`);
+
+        eventSource.addEventListener('connected', () => {
+          setConnectionStatus('live');
+        });
+
+        eventSource.addEventListener('status_update', (e) => {
+          try {
+            const data: PublicOrderStatusData = JSON.parse(e.data);
+            handleStatusUpdate(data);
+            setConnectionStatus('live');
+          } catch {}
+        });
+
+        eventSource.onerror = () => {
+          setConnectionStatus('polling');
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+          if (!pollInterval) {
+            pollInterval = setInterval(() => {
+              if (!document.hidden && navigator.onLine) {
+                fetchStatus(code, true);
+              }
+            }, 5000);
+          }
+        };
+      } catch {
+        setConnectionStatus('polling');
+      }
+    };
+
+    connectSse();
+
+    // 5-second lightweight fallback polling
+    pollInterval = setInterval(() => {
+      if (!document.hidden && navigator.onLine) {
+        fetchStatus(code, true);
+      }
+    }, 5000);
+
+    return () => {
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
+    };
   }, [orderData?.referenceCode, orderData?.status]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     fetchStatus(refCode);
+  };
+
+  const toggleSound = () => {
+    const next = !notifySound;
+    setNotifySound(next);
+    localStorage.setItem('oyangoren_notify_sound', String(next));
   };
 
   const isCancelled = orderData?.status === 'cancelled';
@@ -188,14 +344,46 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
       {orderData && (
         <div
           id="order-details-card"
-          className="bg-white rounded-3xl border border-slate-200/80 p-6 sm:p-8 shadow-md space-y-6 animate-fadeIn"
+          className={`bg-white rounded-3xl border p-6 sm:p-8 shadow-md space-y-6 transition-all duration-300 ${
+            statusHighlight ? 'border-sky-500 ring-4 ring-sky-500/20 scale-[1.01]' : 'border-slate-200/80'
+          }`}
         >
-          {/* Header */}
+          {/* Header & Connection Indicator */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
             <div>
-              <span className="text-[11px] uppercase tracking-wider font-bold text-slate-400">
-                Oyangoren Reference
-              </span>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[11px] uppercase tracking-wider font-bold text-slate-400">
+                  Oyangoren Reference
+                </span>
+                {/* Live Connection Badge */}
+                <div
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                    connectionStatus === 'live'
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : connectionStatus === 'offline'
+                      ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                      : 'bg-amber-50 text-amber-700 border border-amber-200'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      connectionStatus === 'live'
+                        ? 'bg-emerald-500 animate-pulse'
+                        : connectionStatus === 'offline'
+                        ? 'bg-rose-500'
+                        : 'bg-amber-500 animate-ping'
+                    }`}
+                  />
+                  <span>
+                    {connectionStatus === 'live'
+                      ? '● Live'
+                      : connectionStatus === 'offline'
+                      ? 'Offline — waiting for connection'
+                      : 'Checking for updates...'}
+                  </span>
+                </div>
+              </div>
+
               <h3 className="text-3xl font-black text-slate-900 font-mono tracking-wide text-sky-700">
                 {orderData.referenceCode}
               </h3>
@@ -204,13 +392,40 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
               </p>
             </div>
 
-            <div className="text-left sm:text-right space-y-0.5">
-              <span className="text-[11px] text-slate-400 block">Submitted:</span>
-              <span className="text-xs font-semibold text-slate-700 block">
-                {new Date(orderData.createdAt).toLocaleDateString()} at {new Date(orderData.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            <div className="text-left sm:text-right space-y-1">
+              <span className="text-[11px] text-slate-400 block">
+                Submitted: {formatSafeDateTime(orderData.createdAt)}
               </span>
-              <span className="text-[10px] text-slate-400 block">
-                Updated: {new Date(orderData.lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              <span className="text-xs font-bold text-slate-700 block">
+                Last updated: {formatSafeTime(orderData.lastUpdated, 'Just now')}
+              </span>
+
+              {/* Notification Sound Toggle Control */}
+              <button
+                type="button"
+                onClick={toggleSound}
+                id="btn-toggle-status-sound"
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 hover:text-sky-600 transition-colors cursor-pointer bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-xl"
+                title="Toggle audio notification on status change"
+              >
+                {notifySound ? <Volume2 className="w-3.5 h-3.5 text-sky-600" /> : <VolumeX className="w-3.5 h-3.5 text-slate-400" />}
+                <span>Notify me when status changes ({notifySound ? 'ON' : 'OFF'})</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Quotation & Payment Status Chips */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 rounded-2xl border border-slate-200 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-slate-500 uppercase tracking-wide text-[10px]">Quotation Status:</span>
+              <span className="font-bold text-slate-800 bg-white px-2.5 py-1 rounded-lg border border-slate-200">
+                {orderData.quotationStatus || 'Not Required'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-slate-500 uppercase tracking-wide text-[10px]">Payment Status:</span>
+              <span className="font-bold text-slate-800 bg-white px-2.5 py-1 rounded-lg border border-slate-200">
+                {orderData.paymentStatus || 'Cash on Pickup'}
               </span>
             </div>
           </div>
@@ -276,7 +491,7 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
 
               {/* Prominent Current Status Banner */}
               <div
-                className={`p-4 rounded-2xl border text-sm flex items-start gap-3 ${
+                className={`p-4 rounded-2xl border text-sm flex items-start gap-3 transition-colors ${
                   currentStep === 6
                     ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
                     : currentStep === 5
@@ -298,11 +513,15 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
                 <div>
                   <p className="font-black text-sm">{orderData.statusLabel}</p>
                   <p className="text-xs mt-0.5 text-slate-700">
-                    {orderData.statusDescription}
+                    {currentStep === 5
+                      ? 'Your print request is ready for pickup! Please visit our Oyangoren counter.'
+                      : currentStep === 6
+                      ? 'Your print request has been completed. Thank you for choosing Oyangoren Printing Services!'
+                      : orderData.statusDescription}
                   </p>
                   {currentStep === 5 && (
                     <p className="text-xs font-bold text-teal-800 mt-1">
-                      👉 Ready for Pickup: Show reference code <span className="font-mono">{orderData.referenceCode}</span> at the counter.
+                      👉 Reference Code: <span className="font-mono bg-white px-1.5 py-0.5 rounded border border-teal-300">{orderData.referenceCode}</span>
                     </p>
                   )}
                 </div>
@@ -317,7 +536,7 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
                 <History className="w-3.5 h-3.5" />
                 <span>Status History</span>
               </div>
-              <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-slate-50/50 p-2 text-xs">
+              <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-slate-50/50 p-2 text-xs max-h-40 overflow-y-auto">
                 {orderData.timeline.map((item) => (
                   <div key={item.id} className="py-2 px-3 flex items-center justify-between">
                     <span className="font-medium text-slate-700">{item.action}</span>
