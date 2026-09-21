@@ -1,0 +1,6 @@
+{
+  "name": "Oyangoren Printing Services – File Upload System",
+  "description": "Fast, secure mobile-first file upload system for walk-in and remote printing customers of Oyangoren Printing Services.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
