@@ -27,6 +27,8 @@ import {
   ShieldCheck,
   Volume2,
   VolumeX,
+  Play,
+  Upload,
   Eye,
   ArrowUpDown,
   Bell,
@@ -60,7 +62,7 @@ interface AdminDashboardProps {
   onLogout: () => void;
 }
 
-type TabType = 'requests' | 'links' | 'quick-qr' | 'settings';
+type TabType = 'requests' | 'links' | 'quick-qr' | 'settings' | 'notification-sound';
 type SortOption = 'newest' | 'oldest' | 'customer';
 
 interface NewUploadNotification {
@@ -85,8 +87,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [cleanupStatus, setCleanupStatus] = useState<CleanupStatus | null>(null);
 
+  // Persistent Sound Settings State Object (soundEnabled, volume 0-1, customSoundUrl)
+  const [soundSettings, setSoundSettings] = useState<{
+    soundEnabled: boolean;
+    volume: number;
+    customSoundUrl: string | null;
+  }>(() => {
+    try {
+      const saved = localStorage.getItem('oyangoren_notification_sound_settings');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          soundEnabled: typeof parsed.soundEnabled === 'boolean' ? parsed.soundEnabled : true,
+          volume: typeof parsed.volume === 'number' ? Math.max(0, Math.min(1, parsed.volume)) : 0.8,
+          customSoundUrl: typeof parsed.customSoundUrl === 'string' ? parsed.customSoundUrl : null,
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return {
+      soundEnabled: true,
+      volume: 0.8,
+      customSoundUrl: null,
+    };
+  });
+
   // Sound preference state
   const [soundEnabled, setSoundEnabled] = useState(() => soundNotifier.isEnabled());
+  const [soundVolume, setSoundVolume] = useState(() => soundNotifier.getVolume());
+  const [selectedSoundType, setSelectedSoundType] = useState<'default' | 'custom'>(() => soundNotifier.getSoundType());
+  const [customSoundFilename, setCustomSoundFilename] = useState<string | null>(() => soundNotifier.getCustomFilename());
+  const [isUploadingSound, setIsUploadingSound] = useState(false);
+  const [soundErrorMsg, setSoundErrorMsg] = useState<string | null>(null);
+  const [soundSuccessMsg, setSoundSuccessMsg] = useState<string | null>(null);
+  const soundFileInputRef = React.useRef<HTMLInputElement>(null);
+  const initialDataLoadedRef = React.useRef(false);
+
+  // Sync soundSettings with localStorage and soundNotifier
+  useEffect(() => {
+    try {
+      localStorage.setItem('oyangoren_notification_sound_settings', JSON.stringify(soundSettings));
+      soundNotifier.updateConfig({
+        soundEnabled: soundSettings.soundEnabled,
+        soundVolume: Math.round(soundSettings.volume * 100),
+        selectedSoundType: soundSettings.customSoundUrl ? 'custom' : 'default',
+        customSoundFilename: soundSettings.customSoundUrl ? 'custom_sound' : null,
+      });
+    } catch {
+      // ignore
+    }
+  }, [soundSettings]);
 
   // Real-time notification banner state
   const [latestNotification, setLatestNotification] = useState<NewUploadNotification | null>(null);
@@ -168,14 +219,231 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     [token, onLogout]
   );
 
-  // Toggle sound setting
-  const toggleSound = () => {
+  // Sound Notification Toggle Handler
+  const handleToggleSoundEnabled = async () => {
     const nextVal = !soundEnabled;
-    soundNotifier.setEnabled(nextVal);
     setSoundEnabled(nextVal);
+    soundNotifier.setEnabled(nextVal);
     if (nextVal) {
-      soundNotifier.playChime();
+      soundNotifier.playNotificationSound();
     }
+    try {
+      await authFetch('/api/admin/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ soundEnabled: nextVal }),
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleChangeSoundType = async (newType: 'default' | 'custom') => {
+    setSelectedSoundType(newType);
+    soundNotifier.setSoundType(newType);
+    if (newType === 'custom' && !customSoundFilename) {
+      setSoundErrorMsg('Please upload a custom sound file first.');
+      return;
+    }
+    setSoundErrorMsg(null);
+    try {
+      await authFetch('/api/admin/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectedSoundType: newType }),
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleVolumeChange = (newVol: number) => {
+    setSoundVolume(newVol);
+    soundNotifier.setVolume(newVol);
+  };
+
+  const handleVolumeSave = async (vol: number) => {
+    try {
+      await authFetch('/api/admin/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ soundVolume: vol }),
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleTestSound = () => {
+    soundNotifier.playNotificationSound();
+  };
+
+  const handleUploadCustomSound = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      setSoundErrorMsg('Sound file is too large. Maximum size is 5 MB.');
+      return;
+    }
+
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    const validExts = ['mp3', 'wav', 'ogg', 'm4a'];
+    if (!validExts.includes(ext) && !file.type.startsWith('audio/')) {
+      setSoundErrorMsg('Unsupported audio format. Please upload an MP3, WAV, or OGG file.');
+      return;
+    }
+
+    setSoundErrorMsg(null);
+    setIsUploadingSound(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('soundFile', file);
+
+      const res = await fetch('/api/admin/settings/notification-sound', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setCustomSoundFilename(data.settings.customSoundFilename);
+        setSelectedSoundType('custom');
+        soundNotifier.updateConfig({
+          soundEnabled: true,
+          selectedSoundType: 'custom',
+          customSoundFilename: data.settings.customSoundFilename,
+          hasCustomSound: true,
+        });
+        setSoundSuccessMsg('Custom notification sound uploaded and activated successfully!');
+        setTimeout(() => setSoundSuccessMsg(null), 4000);
+        soundNotifier.playNotificationSound();
+      } else {
+        setSoundErrorMsg(data.error || 'Failed to upload custom sound.');
+      }
+    } catch {
+      setSoundErrorMsg('Error uploading custom sound file.');
+    } finally {
+      setIsUploadingSound(false);
+      if (soundFileInputRef.current) {
+        soundFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleRemoveCustomSound = async () => {
+    setSoundErrorMsg(null);
+    try {
+      const res = await fetch('/api/admin/settings/notification-sound', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setCustomSoundFilename(null);
+        setSelectedSoundType('default');
+        soundNotifier.updateConfig({
+          selectedSoundType: 'default',
+          customSoundFilename: null,
+          hasCustomSound: false,
+        });
+        setSoundSuccessMsg('Restored default notification sound.');
+        setTimeout(() => setSoundSuccessMsg(null), 3000);
+      } else {
+        setSoundErrorMsg(data.error || 'Failed to remove custom sound.');
+      }
+    } catch {
+      setSoundErrorMsg('Error removing custom sound.');
+    }
+  };
+
+  // Dedicated SoundSettings Handlers (state object with soundEnabled, volume 0-1, customSoundUrl)
+  const handleToggleSoundSettingsEnabled = () => {
+    setSoundSettings((prev) => {
+      const next = { ...prev, soundEnabled: !prev.soundEnabled };
+      if (next.soundEnabled) {
+        soundNotifier.playNotificationSound();
+      }
+      return next;
+    });
+  };
+
+  const handleSoundSettingsVolumeChange = (newVol: number) => {
+    const clamped = Math.max(0, Math.min(1, newVol));
+    setSoundSettings((prev) => ({ ...prev, volume: clamped }));
+  };
+
+  const handleSoundSettingsFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      setSoundErrorMsg('Sound file is too large. Maximum size is 5 MB.');
+      return;
+    }
+
+    setSoundErrorMsg(null);
+    setIsUploadingSound(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('soundFile', file);
+
+      const res = await fetch('/api/admin/settings/notification-sound', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        const fileUrl = `/api/admin/settings/notification-sound/file?t=${Date.now()}`;
+        setSoundSettings((prev) => ({
+          ...prev,
+          customSoundUrl: fileUrl,
+        }));
+        setCustomSoundFilename(data.settings?.customSoundFilename || file.name);
+        setSoundSuccessMsg('Custom notification sound uploaded successfully!');
+        setTimeout(() => setSoundSuccessMsg(null), 4000);
+        soundNotifier.playNotificationSound();
+      } else {
+        setSoundErrorMsg(data.error || 'Failed to upload custom sound.');
+      }
+    } catch {
+      setSoundErrorMsg('Error uploading custom sound file.');
+    } finally {
+      setIsUploadingSound(false);
+      if (soundFileInputRef.current) {
+        soundFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleClearCustomSoundUrl = async () => {
+    setSoundErrorMsg(null);
+    try {
+      await fetch('/api/admin/settings/notification-sound', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch {
+      // ignore
+    }
+    setSoundSettings((prev) => ({ ...prev, customSoundUrl: null }));
+    setCustomSoundFilename(null);
+    setSoundSuccessMsg('Restored default notification sound.');
+    setTimeout(() => setSoundSuccessMsg(null), 3000);
   };
 
   // Load all dashboard data
@@ -190,6 +458,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       if (reqRes.ok) {
         const reqData: PrintRequest[] = await reqRes.json();
+        if (!initialDataLoadedRef.current) {
+          initialDataLoadedRef.current = true;
+          soundNotifier.markRequestsSeen(reqData.map((r) => r.id));
+        } else {
+          for (const req of reqData) {
+            soundNotifier.notifyNewRequest(req.id);
+          }
+        }
         setRequests(reqData);
       }
       if (linksRes.ok) {
@@ -204,6 +480,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           setCleanupStatus(setData.cleanupStatus);
         }
         setMaxSizeInput(setData.settings.maxFileSizeMB);
+
+        const sEnabled = setData.settings.soundEnabled ?? true;
+        const sVolume = setData.settings.soundVolume ?? 80;
+        const sType = setData.settings.selectedSoundType || 'default';
+        const sFilename = setData.settings.customSoundFilename || null;
+
+        setSoundEnabled(sEnabled);
+        setSoundVolume(sVolume);
+        setSelectedSoundType(sType);
+        setCustomSoundFilename(sFilename);
+
+        soundNotifier.updateConfig({
+          soundEnabled: sEnabled,
+          soundVolume: sVolume,
+          selectedSoundType: sType,
+          customSoundFilename: sFilename,
+          hasCustomSound: setData.settings.hasCustomSound,
+        });
 
         const days = setData.settings.autoCleanupDays ?? 14;
         setCleanupDaysInput(days);
@@ -243,8 +537,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           const data = JSON.parse(event.data);
           const req: PrintRequest = data.request;
 
-          // 1. Play sound notification chime
-          soundNotifier.playChime();
+          // 1. Play sound notification chime (duplicate-safe check)
+          soundNotifier.notifyNewRequest(req.id);
 
           // 2. Set banner notification
           setLatestNotification({
@@ -779,7 +1073,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {/* Sound Toggle */}
           <button
             type="button"
-            onClick={toggleSound}
+            onClick={handleToggleSoundEnabled}
             id="btn-toggle-sound-notify"
             title={soundEnabled ? 'Disable notification sound' : 'Enable notification sound'}
             className={`px-3 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-colors border cursor-pointer ${
@@ -913,6 +1207,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         >
           <QrCode className="w-4 h-4" />
           <span>Quick Upload QR</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('notification-sound')}
+          id="tab-btn-notification-sound"
+          className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all whitespace-nowrap cursor-pointer ${
+            activeTab === 'notification-sound'
+              ? 'bg-sky-600 text-white shadow-md shadow-sky-600/20'
+              : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800'
+          }`}
+        >
+          <Volume2 className="w-4 h-4" />
+          <span>Notification Sound</span>
         </button>
 
         <button
@@ -1712,6 +2019,192 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* ==================================================== */}
       {activeTab === 'settings' && (
         <div className="max-w-2xl mx-auto space-y-6 animate-fadeIn">
+          {/* Notification Sound Settings Card */}
+          <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-xs space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-sky-50 dark:bg-sky-950/60 text-sky-600 dark:text-sky-400 flex items-center justify-center">
+                  <Volume2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                    Notification Sound
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Audio alerts when new customer print requests arrive
+                  </p>
+                </div>
+              </div>
+
+              {/* ON / OFF Toggle */}
+              <button
+                type="button"
+                id="btn-toggle-notification-sound"
+                onClick={handleToggleSoundEnabled}
+                className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+                  soundEnabled
+                    ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 hover:bg-emerald-600'
+                    : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-300 dark:hover:bg-slate-700'
+                }`}
+              >
+                {soundEnabled ? (
+                  <>
+                    <Volume2 className="w-3.5 h-3.5" />
+                    <span>ON</span>
+                  </>
+                ) : (
+                  <>
+                    <VolumeX className="w-3.5 h-3.5" />
+                    <span>OFF</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {soundErrorMsg && (
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/80 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between">
+                <span>{soundErrorMsg}</span>
+                <button
+                  type="button"
+                  onClick={() => setSoundErrorMsg(null)}
+                  className="text-xs text-rose-500 hover:text-rose-700 dark:hover:text-rose-200 cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {soundSuccessMsg && (
+              <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/80 text-xs text-emerald-700 dark:text-emerald-300 flex items-center justify-between">
+                <span>{soundSuccessMsg}</span>
+                <button
+                  type="button"
+                  onClick={() => setSoundSuccessMsg(null)}
+                  className="text-xs text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-200 cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Sound Selector & Controls */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Sound Option Selector */}
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 space-y-3">
+                <label className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+                  Alert Sound Effect
+                </label>
+                <select
+                  value={selectedSoundType}
+                  onChange={(e) => handleChangeSoundType(e.target.value as 'default' | 'custom')}
+                  disabled={!soundEnabled}
+                  id="select-notification-sound-type"
+                  className="w-full rounded-xl border border-slate-300 dark:border-slate-700 p-2.5 text-sm text-slate-800 dark:text-slate-100 bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50 cursor-pointer"
+                >
+                  <option value="default">Default Sound (Harmonized Bell)</option>
+                  {customSoundFilename ? (
+                    <option value="custom">Custom Sound ({customSoundFilename})</option>
+                  ) : (
+                    <option value="custom" disabled>
+                      Custom Sound (Upload a sound file below)
+                    </option>
+                  )}
+                </select>
+
+                <div className="flex items-center gap-2 pt-1 flex-wrap">
+                  <button
+                    type="button"
+                    id="btn-test-notification-sound"
+                    onClick={handleTestSound}
+                    disabled={!soundEnabled}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-xs transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Test Sound</span>
+                  </button>
+
+                  <input
+                    type="file"
+                    ref={soundFileInputRef}
+                    accept="audio/*,.mp3,.wav,.ogg,.m4a"
+                    onChange={handleUploadCustomSound}
+                    className="hidden"
+                  />
+
+                  <button
+                    type="button"
+                    id="btn-upload-custom-sound"
+                    onClick={() => soundFileInputRef.current?.click()}
+                    disabled={isUploadingSound}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs transition-colors cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                    <span>
+                      {isUploadingSound
+                        ? 'Uploading...'
+                        : customSoundFilename
+                        ? 'Change Sound'
+                        : 'Upload Custom Sound'}
+                    </span>
+                  </button>
+
+                  {customSoundFilename && (
+                    <button
+                      type="button"
+                      id="btn-restore-default-sound"
+                      onClick={handleRemoveCustomSound}
+                      className="p-2 rounded-xl text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
+                      title="Restore Default Sound"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                  Supported formats: MP3, WAV, OGG, M4A (Max 5 MB).
+                </p>
+              </div>
+
+              {/* Volume Slider */}
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 space-y-3 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                      Volume Level
+                    </label>
+                    <span className="text-xs font-mono font-bold text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-950/80 px-2 py-0.5 rounded-md border border-sky-200 dark:border-sky-800">
+                      {soundVolume}%
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-3 pt-2">
+                    <VolumeX className="w-4 h-4 text-slate-400 shrink-0" />
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={soundVolume}
+                      disabled={!soundEnabled}
+                      id="slider-notification-volume"
+                      onChange={(e) => handleVolumeChange(Number(e.target.value))}
+                      onMouseUp={(e) => handleVolumeSave(Number((e.target as HTMLInputElement).value))}
+                      onTouchEnd={(e) => handleVolumeSave(Number((e.target as HTMLInputElement).value))}
+                      className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-sky-500 disabled:opacity-50"
+                    />
+                    <Volume2 className="w-4 h-4 text-slate-600 dark:text-slate-300 shrink-0" />
+                  </div>
+                </div>
+
+                <div className="pt-2 text-[11px] text-slate-400 dark:text-slate-500 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-500 shrink-0"></span>
+                  <span>Applies to new incoming request chime alerts in this active session.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Storage & Limits Summary Card */}
           <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-4">
             <div className="flex items-center justify-between">
@@ -2149,6 +2642,197 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* TAB 5: NOTIFICATION SOUND SETTINGS */}
+      {/* ==================================================== */}
+      {activeTab === 'notification-sound' && (
+        <div className="max-w-2xl mx-auto space-y-6 animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 border border-slate-200 dark:border-slate-800 shadow-md space-y-6">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-5">
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-sky-50 dark:bg-sky-950/80 text-sky-600 dark:text-sky-400 flex items-center justify-center shadow-xs">
+                  <Volume2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-black text-slate-900 dark:text-slate-100">
+                    Notification Sound Settings
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Configure real-time audio chime alerts for incoming print requests
+                  </p>
+                </div>
+              </div>
+
+              {/* Master Toggle */}
+              <button
+                type="button"
+                id="tab-toggle-sound-enabled"
+                onClick={handleToggleSoundSettingsEnabled}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-black transition-all cursor-pointer shadow-xs ${
+                  soundSettings.soundEnabled
+                    ? 'bg-emerald-500 text-white shadow-emerald-500/20 hover:bg-emerald-600'
+                    : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-300 dark:hover:bg-slate-700'
+                }`}
+              >
+                {soundSettings.soundEnabled ? (
+                  <>
+                    <Volume2 className="w-4 h-4" />
+                    <span>ENABLED</span>
+                  </>
+                ) : (
+                  <>
+                    <VolumeX className="w-4 h-4" />
+                    <span>DISABLED</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {soundErrorMsg && (
+              <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between">
+                <span>{soundErrorMsg}</span>
+                <button
+                  type="button"
+                  onClick={() => setSoundErrorMsg(null)}
+                  className="font-bold hover:underline cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {soundSuccessMsg && (
+              <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 flex items-center justify-between">
+                <span>{soundSuccessMsg}</span>
+                <button
+                  type="button"
+                  onClick={() => setSoundSuccessMsg(null)}
+                  className="font-bold hover:underline cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Main Controls Grid */}
+            <div className="grid grid-cols-1 gap-6">
+              {/* Volume Slider (0 - 1) */}
+              <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider block">
+                    Alert Volume Level (0.0 – 1.0)
+                  </label>
+                  <span className="text-xs font-mono font-black text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-950/80 px-2.5 py-1 rounded-lg border border-sky-200 dark:border-sky-800">
+                    {soundSettings.volume.toFixed(2)} ({Math.round(soundSettings.volume * 100)}%)
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-4 pt-1">
+                  <VolumeX className="w-5 h-5 text-slate-400 shrink-0" />
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={soundSettings.volume}
+                    disabled={!soundSettings.soundEnabled}
+                    id="slider-sound-volume-tab"
+                    onChange={(e) => handleSoundSettingsVolumeChange(Number(e.target.value))}
+                    className="w-full h-2.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-sky-500 disabled:opacity-40"
+                  />
+                  <Volume2 className="w-5 h-5 text-slate-600 dark:text-slate-300 shrink-0" />
+                </div>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                  Controls the playback gain level for both default harmonic chimes and custom audio alerts.
+                </p>
+              </div>
+
+              {/* Custom Sound Upload & Source */}
+              <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 space-y-4">
+                <div>
+                  <label className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider block mb-1">
+                    Custom Alert Sound Audio Source
+                  </label>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {soundSettings.customSoundUrl
+                      ? 'Using custom audio file from storage.'
+                      : 'Currently using default harmonic bell tone.'}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3 flex-wrap pt-1">
+                  <button
+                    type="button"
+                    id="btn-test-sound-tab"
+                    onClick={handleTestSound}
+                    disabled={!soundSettings.soundEnabled}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-sm transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    <Play className="w-4 h-4 fill-current" />
+                    <span>Test Play Sound</span>
+                  </button>
+
+                  <input
+                    type="file"
+                    ref={soundFileInputRef}
+                    accept="audio/*,.mp3,.wav,.ogg,.m4a"
+                    onChange={handleSoundSettingsFileUpload}
+                    className="hidden"
+                  />
+
+                  <button
+                    type="button"
+                    id="btn-upload-custom-sound-tab"
+                    onClick={() => soundFileInputRef.current?.click()}
+                    disabled={isUploadingSound}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-bold text-xs shadow-xs transition-colors cursor-pointer"
+                  >
+                    <Upload className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+                    <span>
+                      {isUploadingSound
+                        ? 'Uploading...'
+                        : soundSettings.customSoundUrl
+                        ? 'Replace Sound File'
+                        : 'Upload Custom Sound (MP3 / WAV)'}
+                    </span>
+                  </button>
+
+                  {soundSettings.customSoundUrl && (
+                    <button
+                      type="button"
+                      id="btn-restore-default-sound-tab"
+                      onClick={handleClearCustomSoundUrl}
+                      className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors text-xs font-bold cursor-pointer"
+                      title="Reset to default chime"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>Reset to Default</span>
+                    </button>
+                  )}
+                </div>
+
+                {soundSettings.customSoundUrl && (
+                  <div className="p-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                    <span className="text-xs font-mono text-slate-600 dark:text-slate-300 truncate">
+                      URL: {soundSettings.customSoundUrl}
+                    </span>
+                    <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/80 px-2 py-0.5 rounded uppercase">
+                      Active
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs text-slate-400 dark:text-slate-500">
+              <span>Settings auto-saved to localStorage</span>
+              <span className="font-mono">oyangoren_notification_sound_settings</span>
+            </div>
           </div>
         </div>
       )}

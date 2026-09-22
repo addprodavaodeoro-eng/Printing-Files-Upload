@@ -127,6 +127,11 @@ export interface SystemSettings {
   finishingOptions: string[];
   defaultPaperSize?: string;
   defaultColorMode?: 'black_and_white' | 'color';
+  soundEnabled?: boolean;
+  soundVolume?: number;
+  selectedSoundType?: 'default' | 'custom';
+  customSoundFilename?: string | null;
+  hasCustomSound?: boolean;
   lastCleanupAt?: string | null;
   lastCleanupResult?: CleanupResult | null;
   cleanupHistory?: CleanupResult[];

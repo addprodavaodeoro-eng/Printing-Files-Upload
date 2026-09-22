@@ -1,5 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 import multer from 'multer';
 import QRCode from 'qrcode';
 import { createServer as createViteServer } from 'vite';
@@ -1071,6 +1073,11 @@ app.get('/api/admin/settings', requireAdmin, (req: Request, res: Response) => {
       finishingOptions: settings.finishingOptions || [],
       defaultPaperSize: settings.defaultPaperSize || 'Short Bond (8.5" x 11")',
       defaultColorMode: settings.defaultColorMode || 'black_and_white',
+      soundEnabled: settings.soundEnabled ?? true,
+      soundVolume: settings.soundVolume ?? 80,
+      selectedSoundType: settings.selectedSoundType || 'default',
+      customSoundFilename: settings.customSoundFilename || null,
+      hasCustomSound: !!settings.customSoundStoredFilename,
       lastCleanupAt: settings.lastCleanupAt,
       lastCleanupResult: settings.lastCleanupResult,
       cleanupHistory: settings.cleanupHistory || [],
@@ -1090,6 +1097,9 @@ app.post('/api/admin/settings', requireAdmin, (req: Request, res: Response) => {
       finishingOptions,
       defaultPaperSize,
       defaultColorMode,
+      soundEnabled,
+      soundVolume,
+      selectedSoundType,
       newPassword,
     } = req.body;
     const updates: Record<string, any> = {};
@@ -1134,6 +1144,21 @@ app.post('/api/admin/settings', requireAdmin, (req: Request, res: Response) => {
       updates.defaultColorMode = defaultColorMode;
     }
 
+    if (soundEnabled !== undefined) {
+      updates.soundEnabled = Boolean(soundEnabled);
+    }
+
+    if (soundVolume !== undefined) {
+      const vol = Number(soundVolume);
+      if (!isNaN(vol) && vol >= 0 && vol <= 100) {
+        updates.soundVolume = vol;
+      }
+    }
+
+    if (selectedSoundType === 'default' || selectedSoundType === 'custom') {
+      updates.selectedSoundType = selectedSoundType;
+    }
+
     if (Object.keys(updates).length > 0) {
       db.updateSettings(updates);
     }
@@ -1160,6 +1185,11 @@ app.post('/api/admin/settings', requireAdmin, (req: Request, res: Response) => {
         finishingOptions: current.finishingOptions || [],
         defaultPaperSize: current.defaultPaperSize || 'Short Bond (8.5" x 11")',
         defaultColorMode: current.defaultColorMode || 'black_and_white',
+        soundEnabled: current.soundEnabled ?? true,
+        soundVolume: current.soundVolume ?? 80,
+        selectedSoundType: current.selectedSoundType || 'default',
+        customSoundFilename: current.customSoundFilename || null,
+        hasCustomSound: !!current.customSoundStoredFilename,
         lastCleanupAt: current.lastCleanupAt,
         lastCleanupResult: current.lastCleanupResult,
         cleanupHistory: current.cleanupHistory || [],
@@ -1169,6 +1199,154 @@ app.post('/api/admin/settings', requireAdmin, (req: Request, res: Response) => {
   } catch (err) {
     console.error('Error updating settings:', err);
     res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// Custom Sound Asset Directory
+const SOUNDS_DIR = path.resolve(process.cwd(), 'data', 'admin-assets', 'notification-sounds');
+if (!fs.existsSync(SOUNDS_DIR)) {
+  fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+}
+
+// Upload Custom Notification Sound
+app.post(
+  '/api/admin/settings/notification-sound',
+  requireAdmin,
+  upload.single('soundFile'),
+  (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No audio file provided.' });
+      }
+
+      // 1. Validate file size (max 5 MB)
+      const MAX_SOUND_BYTES = 5 * 1024 * 1024;
+      if (req.file.size > MAX_SOUND_BYTES) {
+        return res.status(400).json({ error: 'Sound file is too large. Maximum size is 5 MB.' });
+      }
+
+      // 2. Validate file extension and MIME type
+      const originalName = req.file.originalname || 'custom-sound.mp3';
+      const ext = path.extname(originalName).toLowerCase().replace('.', '');
+      const validExtensions = ['mp3', 'wav', 'ogg', 'm4a'];
+      const validMimePrefixes = ['audio/'];
+
+      const isExtValid = validExtensions.includes(ext);
+      const isMimeValid = validMimePrefixes.some((p) => (req.file?.mimetype || '').startsWith(p));
+
+      if (!isExtValid && !isMimeValid) {
+        return res.status(400).json({
+          error: 'Unsupported audio format. Please upload an MP3, WAV, or OGG file.',
+        });
+      }
+
+      // 3. Clean up previous custom sound if present
+      const settings = db.getSettings();
+      if (settings.customSoundStoredFilename) {
+        const oldPath = path.join(SOUNDS_DIR, settings.customSoundStoredFilename);
+        if (fs.existsSync(oldPath)) {
+          try {
+            fs.unlinkSync(oldPath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      // 4. Save new sound file securely
+      const storedFilename = `sound_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext || 'mp3'}`;
+      const destinationPath = path.join(SOUNDS_DIR, storedFilename);
+      fs.writeFileSync(destinationPath, req.file.buffer);
+
+      // 5. Update settings in DB
+      const updated = db.updateSettings({
+        soundEnabled: true,
+        selectedSoundType: 'custom',
+        customSoundFilename: originalName,
+        customSoundStoredFilename: storedFilename,
+      });
+
+      res.json({
+        success: true,
+        message: 'Custom notification sound uploaded successfully.',
+        settings: {
+          soundEnabled: updated.soundEnabled ?? true,
+          soundVolume: updated.soundVolume ?? 80,
+          selectedSoundType: 'custom',
+          customSoundFilename: originalName,
+          hasCustomSound: true,
+        },
+      });
+    } catch (err) {
+      console.error('Error uploading custom notification sound:', err);
+      res.status(500).json({ error: 'Failed to save custom notification sound.' });
+    }
+  }
+);
+
+// Serve Custom Notification Sound File
+app.get('/api/admin/settings/notification-sound/file', (req: Request, res: Response) => {
+  try {
+    const settings = db.getSettings();
+    if (!settings.customSoundStoredFilename) {
+      return res.status(404).json({ error: 'No custom notification sound configured.' });
+    }
+
+    const soundPath = path.join(SOUNDS_DIR, settings.customSoundStoredFilename);
+    if (!fs.existsSync(soundPath)) {
+      return res.status(404).json({ error: 'Custom notification sound file not found.' });
+    }
+
+    const ext = path.extname(settings.customSoundStoredFilename).toLowerCase();
+    let contentType = 'audio/mpeg';
+    if (ext === '.wav') contentType = 'audio/wav';
+    else if (ext === '.ogg') contentType = 'audio/ogg';
+    else if (ext === '.m4a') contentType = 'audio/mp4';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+    res.sendFile(soundPath);
+  } catch (err) {
+    console.error('Error serving notification sound:', err);
+    res.status(500).json({ error: 'Failed to serve notification sound file.' });
+  }
+});
+
+// Remove Custom Notification Sound (Restore Default)
+app.delete('/api/admin/settings/notification-sound', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const settings = db.getSettings();
+    if (settings.customSoundStoredFilename) {
+      const oldPath = path.join(SOUNDS_DIR, settings.customSoundStoredFilename);
+      if (fs.existsSync(oldPath)) {
+        try {
+          fs.unlinkSync(oldPath);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    const updated = db.updateSettings({
+      selectedSoundType: 'default',
+      customSoundFilename: null,
+      customSoundStoredFilename: null,
+    });
+
+    res.json({
+      success: true,
+      message: 'Restored default notification sound.',
+      settings: {
+        soundEnabled: updated.soundEnabled ?? true,
+        soundVolume: updated.soundVolume ?? 80,
+        selectedSoundType: 'default',
+        customSoundFilename: null,
+        hasCustomSound: false,
+      },
+    });
+  } catch (err) {
+    console.error('Error removing custom notification sound:', err);
+    res.status(500).json({ error: 'Failed to remove custom notification sound.' });
   }
 });
 

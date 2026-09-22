@@ -114,6 +114,11 @@ export interface SettingsRecord {
   finishingOptions: string[];
   defaultPaperSize?: string;
   defaultColorMode?: 'black_and_white' | 'color';
+  soundEnabled?: boolean;
+  soundVolume?: number;
+  selectedSoundType?: 'default' | 'custom';
+  customSoundFilename?: string | null;
+  customSoundStoredFilename?: string | null;
   adminPasswordHash: string;
   adminPasswordSalt: string;
   lastCleanupAt?: string | null;
@@ -187,6 +192,11 @@ function getDefaultSettings(): SettingsRecord {
     ],
     defaultPaperSize: 'Short Bond (8.5" x 11")',
     defaultColorMode: 'black_and_white',
+    soundEnabled: true,
+    soundVolume: 80,
+    selectedSoundType: 'default',
+    customSoundFilename: null,
+    customSoundStoredFilename: null,
     adminPasswordHash: hash,
     adminPasswordSalt: salt,
     lastCleanupAt: null,
@@ -207,6 +217,15 @@ function loadDB(): DatabaseSchema {
       if (!data.settings) {
         data.settings = getDefaultSettings();
       } else {
+        if (data.settings.soundEnabled === undefined) {
+          data.settings.soundEnabled = true;
+        }
+        if (data.settings.soundVolume === undefined) {
+          data.settings.soundVolume = 80;
+        }
+        if (!data.settings.selectedSoundType) {
+          data.settings.selectedSoundType = 'default';
+        }
         if (data.settings.cleanupIntervalHours === undefined) {
           data.settings.cleanupIntervalHours = 1;
         }
